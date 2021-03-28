@@ -1,0 +1,158 @@
+library(dplyr)
+library(Seurat)
+library(cowplot)
+library(viridis)
+library(scMCA)
+
+fplusoil.data <- Read10X(data.dir = "/Users/froog_000/Desktop/KArimoto_scRNASeq/fplus_oil_filtered_feature_bc_matrix/")
+fplustam.data <- Read10X(data.dir = "/Users/froog_000/Desktop/KArimoto_scRNASeq/fplus_tam_filtered_feature_bc_matrix/")
+
+fplusoil <- CreateSeuratObject(counts = fplusoil.data, project = "fplus_oil", min.cells = 3)
+fplusoil[["percent.mt"]] <- PercentageFeatureSet(fplusoil, pattern = "^mt-")
+
+fplustam <- CreateSeuratObject(counts = fplustam.data, project = "fplus_tam", min.cells = 3)
+fplustam[["percent.mt"]] <- PercentageFeatureSet(fplustam, pattern = "^mt-")
+
+VlnPlot(fplusoil, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+VlnPlot(fplustam, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+fplusoil$tam <- "oil"
+fplusoil <- subset(fplusoil, subset = nFeature_RNA > 200 & percent.mt < 15)
+fplusoil <- NormalizeData(fplusoil, verbose = FALSE)
+fplusoil <- FindVariableFeatures(fplusoil, selection.method = "vst", nfeatures = 2000)
+
+fplustam$tam <- "tam"
+fplustam <- subset(fplustam, subset = nFeature_RNA > 200 & percent.mt < 15)
+fplustam <- NormalizeData(fplustam, verbose = FALSE)
+fplustam <- FindVariableFeatures(fplustam, selection.method = "vst", nfeatures = 2000)
+
+fplus.anchors <- FindIntegrationAnchors(object.list = list(fplusoil, fplustam), dims = 1:20)
+to_integrate <- Reduce(intersect, lapply(fplus.anchors@object.list, rownames))
+fplus.combined <- IntegrateData(anchorset = fplus.anchors, features.to.integrate = to_integrate, dims = 1:20)
+
+DefaultAssay(fplus.combined) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+fplus.combined <- ScaleData(fplus.combined, verbose = FALSE)
+fplus.combined <- RunPCA(fplus.combined, npcs = 30, verbose = FALSE)
+
+ElbowPlot(fplus.combined)
+
+library(reticulate)
+use_python(python = "C:/Users/karim/Anaconda3", required = TRUE)
+
+
+# UMAP and Clustering
+fplus.combined <- RunUMAP(fplus.combined, reduction = "pca", dims = 1:15)
+fplus.combined <- FindNeighbors(fplus.combined, reduction = "pca", dims = 1:15)
+fplus.combined <- FindClusters(fplus.combined, resolution = 1)
+
+# Visualization
+p1 <- DimPlot(fplus.combined, reduction = "umap", group.by = "tam")
+p2 <- DimPlot(fplus.combined, reduction = "umap", label = TRUE)
+plot_grid(p1, p2)
+DimPlot(fplus.combined, reduction = "umap", split.by = "tam", label = TRUE)
+
+table(Idents(fplus.combined), fplus.combined$tam)
+
+#Cellharmony analysis
+fplus.combined_counts <- GetAssayData(object = fplus.combined, assay = "RNA", slot = "counts")
+mca_combined <- scMCA(scdata=fplus.combined_counts, numbers_plot = 3)
+
+#save(mca_combined, file = "/Users/froog_000/Desktop/KArimoto_scRNASeq/mca_combined.Rdata")
+
+#Getting the best correlated celltype of each cluster
+#Getting best correlated cell type for each cell
+celltypes <- mca_combined$scMCA
+
+#converting to dataframe
+celltypes <- as.data.frame(celltypes)
+
+# Merging with seurat metadata
+# Direct version
+type_meta_merge <- merge(fplus.combined@meta.data, celltypes, by=0)
+
+# Reformatting type_meta_merge
+combined_meta_types <- type_meta_merge[,-1]
+rownames(combined_meta_types) <- type_meta_merge[,1]
+rm(type_meta_merge)
+
+combined_meta_types$cells <- rownames(combined_meta_types)
+combined_meta_subset <- dplyr::select(combined_meta_types, cells, seurat_clusters, tam, celltypes)
+
+# Subsetting single cluster type
+cluster_meta_subset <- combined_meta_subset %>% filter(seurat_clusters == 10 
+                                                       #,sample == "ae9a"
+)
+
+# Quantifying cell distribution
+quant_cms <- dplyr::count(cluster_meta_subset, tam, celltypes)
+
+....................................................................
+
+#Heatmap of average exp (by cluster)
+cluster.average <- AverageExpression(fplus.combined, return.seurat = TRUE)
+DoHeatmap(cluster.average, features = c("Itga4", "Itgb1", "Itga6", "Abcc1", "Adam17","Il1rap", "Trpv2", "Lnpep", "Spn", "Gna15", "Star", "Gpsm1", "Mamdc2", "Shank3", "Dnmt3b", "Aif1l", "Nynrin", "Bivm", "Vcam1", "Pecam1"), size = 3, draw.lines = FALSE)
+DoHeatmap(cluster.average, features = unlist(TopFeatures(fplus.combined[["pca"]], balanced = TRUE)), size = 3, draw.lines = FALSE)
+
+#Violin plot
+VlnPlot(fplus.combined, features = c("Itga4"), pt.size = 0)
+VlnPlot(fplus.combined, features = c("Itga4"))
+VlnPlot(fplus.combined, features = c("Itgb1"), split.by = "tam", pt.size = 0)
+
+VlnPlot(fplus.combined, features = c("Itga1"), pt.size = 0, slot = "data")
+VlnPlot(fplus.combined, features = c("Itga1"), pt.size = 0, assay = "RNA", slot = "data")
+VlnPlot(fplus.combined, features = c("Itga1"), pt.size = 0, split.by = "tam", assay = "RNA", slot = "data")
+
+
+vln.plots <- VlnPlot(fplus.combined, features = c("Itga4", "Itgb1"), pt.size = 0)
+CombinePlots(plots = vln.plots, ncol = 1)
+
+#DE features: 1 cluster vs others (e.g.0 vs 1-12)
+fplus.combined.markers <- FindAllMarkers(fplus.combined, min.pct = 0.5, logfc.threshold = 1)
+fplus.combined.markers %>% group_by(cluster)
+
+write.csv(fplus.combined.markers, "Cluster_markers_fc1.190808PCA15 re1.csv")
+
+
+#Dot plots
+plot.selected <- subset(fplus.combined, idents = c("9")
+markers.to.plot <- c("Cd34", "Kit")
+DotPlot(fplus.combined, plot.selected,features = rev(markers.to.plot))
+DotPlot(fplus.combined, features = rev(markers.to.plot), plot.selected, split.by = "tam")
+
+
+
+
+##subset on a combination of criteria##
+#Example: high Itga4 & Itgb1 in cluster 9
+subset.Itg <- subset(fplus.combined, subset = Itga4 > 0.5 & Itgb1 > 0.5, idents = "9")
+DimPlot(subset.Itg, reduction = "umap")
+
+subset.Itg <- FindVariableFeatures(subset.Itg, selection.method = "vst", nfeatures = 2000)
+subset.Itg <- ScaleData(subset.Itg, verbose = FALSE)
+subset.Itg <- RunPCA(subset.Itg, npcs = 30, verbose = FALSE)
+ElbowPlot(subset.Itg)
+
+subset.Itg <- RunUMAP(subset.Itg, reduction = "pca", dims = 1:15)
+subset.Itg <- FindNeighbors(subset.Itg, reduction = "pca", dims = 1:15)
+subset.Itg <- FindClusters(subset.Itg, resolution = 0.5)
+
+p1 <- DimPlot(subset.Itg, reduction = "umap", group.by = "tam")
+p2 <- DimPlot(subset.Itg, reduction = "umap", label = TRUE)
+plot_grid(p1, p2)
+
+DimPlot(subset.Itg, reduction = "umap", split.by = "tam")
+DimPlot(subset.Itg, reduction = "umap", split.by = "tam", label = TRUE)
+DimPlot(subset.Itg, reduction = "umap", split.by = "ident")
+
+
+#number of cells
+table(Idents(subset.Itg))
+prop.table(table(Idents(subset.Itg)))
+
+table(Idents(subset.Itg), subset.Itg$tam)
+prop.table(table(Idents(subset.Itg), subset.Itg$tam), margin = 2)
+
+
+
